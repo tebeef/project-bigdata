@@ -1,0 +1,9 @@
+# Data & Logs
+data/raw/*.csv
+hive-data/
+postgres_data/
+*.log
+
+# Python
+__pycache__/
+.ipynb_checkpoints/

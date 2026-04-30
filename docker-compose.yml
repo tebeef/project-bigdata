@@ -1,0 +1,157 @@
+services:
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    hostname: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin;
+        mc mb --ignore-existing local/bigdata;
+        echo 'Bucket bigdata siap!';
+      "
+    networks:
+      - bigdata-net
+
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    hostname: spark-master
+    user: root
+    command: >
+      /bin/bash -c "/opt/spark/sbin/start-master.sh &&
+      tail -f /opt/spark/logs/spark--org.apache.spark.deploy.master.Master-*.out"
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - ./conf/hive-site.xml:/opt/spark/conf/hive-site.xml
+    networks:
+      - bigdata-net
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark-worker
+    hostname: spark-worker
+    user: root
+    command: >
+      /bin/bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 &&
+      tail -f /opt/spark/logs/spark--org.apache.spark.deploy.worker.Worker-*.out"
+    environment:
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_WEBUI_PORT: "8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      - spark-master
+    volumes:
+      - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - ./conf/hive-site.xml:/opt/spark/conf/hive-site.xml
+    networks:
+      - bigdata-net
+
+  postgres:
+    image: postgres:15
+    container_name: hive-postgres
+    hostname: postgres
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hivepassword
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hive-metastore:
+    image: apache/hive:4.0.0          # ← satu-satunya tag yang ada
+    container_name: hive-metastore
+    hostname: hive-metastore
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SKIP_SCHEMA_INIT: "false"
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hivepassword
+    ports:
+      - "9083:9083"
+    volumes:
+      - ./conf/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./postgresql-jdbc.jar:/opt/hive/lib/postgres.jar   # ← WAJIB untuk koneksi PostgreSQL
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9083"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  jupyter:
+    image: jupyter/pyspark-notebook:latest
+    container_name: jupyter
+    hostname: jupyter
+    ports:
+      - "8888:8888"
+      - "4040:4040"
+    environment:
+      JUPYTER_TOKEN: bigdata2026
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data
+      - ./conf/hive-site.xml:/usr/local/spark/conf/hive-site.xml
+      - ./conf/spark-defaults.conf:/usr/local/spark/conf/spark-defaults.conf
+    depends_on:
+      - spark-master
+      - spark-worker
+      - hive-metastore
+      - minio
+    networks:
+      - bigdata-net
+
+volumes:
+  minio_data:
+  postgres_data: 
+
+networks:
+  bigdata-net:
+    driver: bridge
